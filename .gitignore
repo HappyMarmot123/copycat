@@ -1,0 +1,5 @@
+bin/
+tmp_server.log
+web_downloads/
+.env
+*.exe
