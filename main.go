@@ -1,15 +1,20 @@
-﻿package main
+package main
 
 import (
 	"bufio"
 	"bytes"
-	"crypto/sha1"
 	"context"
-	"encoding/json"
+	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"math/rand"
@@ -27,33 +32,36 @@ import (
 )
 
 const (
-	jobMaxLogs   = 3000
-	downloadDir  = "web_downloads"
-	defaultPort  = 8080
-	defaultTimeout = 30
-	envFilePath  = ".env"
+	jobMaxLogs     = 3000
+	downloadDir    = "web_downloads"
+	defaultPort    = 8080
+	defaultTimeout = 1
+	defaultFormat  = "mp4"
+	envFilePath    = ".env"
 )
 
 const (
-	cloudinaryFolderEnv = "CLOUDINARY_AUDIO_FOLDER"
+	cloudinaryFolderEnv    = "CLOUDINARY_AUDIO_FOLDER"
 	cloudinaryCloudNameEnv = "CLOUDINARY_CLOUD_NAME"
-	cloudinaryAPIKeyEnv = "CLOUDINARY_API_KEY"
+	cloudinaryAPIKeyEnv    = "CLOUDINARY_API_KEY"
 	cloudinaryAPISecretEnv = "CLOUDINARY_API_SECRET"
 )
 
 type CloudinaryConfig struct {
-	CloudName   string
-	APIKey      string
-	APISecret   string
+	CloudName    string
+	APIKey       string
+	APISecret    string
 	UploadFolder string
 }
 
 type CloudinaryUploadResult struct {
-	PublicID string `json:"public_id"`
-	URL      string `json:"url"`
-	SecureURL string `json:"secure_url"`
-	Error    *CloudinaryError `json:"error"`
+	PublicID  string           `json:"public_id"`
+	URL       string           `json:"url"`
+	SecureURL string           `json:"secure_url"`
+	Error     *CloudinaryError `json:"error"`
 }
+
+type cloudinaryUploadFunc func(filePath, caption string, tags string) (string, string, error)
 
 type CloudinaryError struct {
 	Message string `json:"message"`
@@ -62,31 +70,31 @@ type CloudinaryError struct {
 type JobStatus string
 
 const (
-	statusQueued   JobStatus = "queued"
-	statusRunning  JobStatus = "running"
-	statusDone     JobStatus = "done"
-	statusFailed   JobStatus = "failed"
-	statusTimeout  JobStatus = "timeout"
+	statusQueued  JobStatus = "queued"
+	statusRunning JobStatus = "running"
+	statusDone    JobStatus = "done"
+	statusFailed  JobStatus = "failed"
+	statusTimeout JobStatus = "timeout"
 )
 
 type DownloadJob struct {
-	ID        string
-	URL       string
-	Format    string
-	Output    string
+	ID           string
+	URL          string
+	Format       string
+	Output       string
 	OutputByUser bool
-	Timeout   int
-	Overwrite bool
+	Timeout      int
+	Overwrite    bool
 
-	Status    JobStatus
-	Error     string
-	OutputPath string
-	ImagePath  string
-	AudioCloudinaryURL string
-	AudioCloudinaryPublicID string
-	ThumbnailCloudinaryURL string
+	Status                      JobStatus
+	Error                       string
+	OutputPath                  string
+	ImagePath                   string
+	AudioCloudinaryURL          string
+	AudioCloudinaryPublicID     string
+	ThumbnailCloudinaryURL      string
 	ThumbnailCloudinaryPublicID string
-	ExitCode  int
+	ExitCode                    int
 
 	Logs       []string
 	CreatedAt  time.Time
@@ -99,26 +107,26 @@ type DownloadJob struct {
 }
 
 type jobStatusResponse struct {
-	ID         string      `json:"id"`
-	URL        string      `json:"url"`
-	Format     string      `json:"format"`
-	Status     JobStatus   `json:"status"`
-	Error      string      `json:"error"`
-	OutputPath string      `json:"outputPath"`
-	ImagePath  string      `json:"imagePath"`
-	AudioCloudinaryURL string `json:"audioCloudinaryUrl"`
-	AudioCloudinaryPublicID string `json:"audioCloudinaryPublicId"`
-	ThumbnailCloudinaryURL string `json:"thumbnailCloudinaryUrl"`
-	ThumbnailCloudinaryPublicID string `json:"thumbnailCloudinaryPublicId"`
-	ExitCode   int         `json:"exitCode"`
-	Timeout    int         `json:"timeout"`
-	Overwrite  bool        `json:"overwrite"`
-	Done       bool        `json:"done"`
-	CreatedAt  string      `json:"createdAt"`
-	UpdatedAt  string      `json:"updatedAt"`
-	FinishedAt interface{} `json:"finishedAt"`
-	Metadata   *YouTubeMetadata `json:"metadata"`
-	Logs       []string    `json:"logs"`
+	ID                          string           `json:"id"`
+	URL                         string           `json:"url"`
+	Format                      string           `json:"format"`
+	Status                      JobStatus        `json:"status"`
+	Error                       string           `json:"error"`
+	OutputPath                  string           `json:"outputPath"`
+	ImagePath                   string           `json:"imagePath"`
+	AudioCloudinaryURL          string           `json:"audioCloudinaryUrl"`
+	AudioCloudinaryPublicID     string           `json:"audioCloudinaryPublicId"`
+	ThumbnailCloudinaryURL      string           `json:"thumbnailCloudinaryUrl"`
+	ThumbnailCloudinaryPublicID string           `json:"thumbnailCloudinaryPublicId"`
+	ExitCode                    int              `json:"exitCode"`
+	Timeout                     int              `json:"timeout"`
+	Overwrite                   bool             `json:"overwrite"`
+	Done                        bool             `json:"done"`
+	CreatedAt                   string           `json:"createdAt"`
+	UpdatedAt                   string           `json:"updatedAt"`
+	FinishedAt                  interface{}      `json:"finishedAt"`
+	Metadata                    *YouTubeMetadata `json:"metadata"`
+	Logs                        []string         `json:"logs"`
 }
 
 type YouTubeMetadata struct {
@@ -231,25 +239,25 @@ func (j *DownloadJob) snapshot() *jobStatusResponse {
 	defer j.mu.Unlock()
 
 	resp := &jobStatusResponse{
-		ID:         j.ID,
-		URL:        j.URL,
-		Format:     j.Format,
-		Status:     j.Status,
-		Error:      j.Error,
-		OutputPath: j.OutputPath,
-		ImagePath:  j.ImagePath,
-		AudioCloudinaryURL: j.AudioCloudinaryURL,
-		AudioCloudinaryPublicID: j.AudioCloudinaryPublicID,
-		ThumbnailCloudinaryURL: j.ThumbnailCloudinaryURL,
+		ID:                          j.ID,
+		URL:                         j.URL,
+		Format:                      j.Format,
+		Status:                      j.Status,
+		Error:                       j.Error,
+		OutputPath:                  j.OutputPath,
+		ImagePath:                   j.ImagePath,
+		AudioCloudinaryURL:          j.AudioCloudinaryURL,
+		AudioCloudinaryPublicID:     j.AudioCloudinaryPublicID,
+		ThumbnailCloudinaryURL:      j.ThumbnailCloudinaryURL,
 		ThumbnailCloudinaryPublicID: j.ThumbnailCloudinaryPublicID,
-		ExitCode:   j.ExitCode,
-		Timeout:    j.Timeout,
-		Overwrite:  j.Overwrite,
-		Done:       j.done,
-		CreatedAt:  j.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:  j.UpdatedAt.Format(time.RFC3339),
-		Metadata:   j.Metadata,
-		Logs:       append([]string{}, j.Logs...),
+		ExitCode:                    j.ExitCode,
+		Timeout:                     j.Timeout,
+		Overwrite:                   j.Overwrite,
+		Done:                        j.done,
+		CreatedAt:                   j.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:                   j.UpdatedAt.Format(time.RFC3339),
+		Metadata:                    j.Metadata,
+		Logs:                        append([]string{}, j.Logs...),
 	}
 
 	if j.FinishedAt != nil {
@@ -265,12 +273,12 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	var (
-		urlArg      = flag.String("url", "", "YouTube URL")
-		formatArg   = flag.String("format", "mp3", "異쒕젰 ?щ㎎ (mp3|mp4)")
-		outputArg   = flag.String("output", "", "異쒕젰 ?뚯씪 寃쎈줈")
-		timeoutArg  = flag.Int("timeout", defaultTimeout, "??꾩븘??遺?")
-		overwrite   = flag.Bool("overwrite", false, "湲곗〈 ?뚯씪 ??뼱?곌린")
-		port        = flag.Int("port", defaultPort, "??UI ?ы듃")
+		urlArg     = flag.String("url", "", "YouTube URL")
+		formatArg  = flag.String("format", defaultFormat, "output format (mp4)")
+		outputArg  = flag.String("output", "", "異쒕젰 ?뚯씪 寃쎈줈")
+		timeoutArg = flag.Int("timeout", defaultTimeout, "??꾩븘??遺?")
+		overwrite  = flag.Bool("overwrite", false, "湲곗〈 ?뚯씪 ??뼱?곌린")
+		port       = flag.Int("port", defaultPort, "??UI ?ы듃")
 	)
 	flag.Parse()
 
@@ -327,9 +335,9 @@ func loadEnvFile(path string) {
 
 func getCloudinaryConfig() (CloudinaryConfig, bool) {
 	cfg := CloudinaryConfig{
-		CloudName: os.Getenv(cloudinaryCloudNameEnv),
-		APIKey:    os.Getenv(cloudinaryAPIKeyEnv),
-		APISecret: os.Getenv(cloudinaryAPISecretEnv),
+		CloudName:    os.Getenv(cloudinaryCloudNameEnv),
+		APIKey:       os.Getenv(cloudinaryAPIKeyEnv),
+		APISecret:    os.Getenv(cloudinaryAPISecretEnv),
 		UploadFolder: os.Getenv(cloudinaryFolderEnv),
 	}
 	if strings.TrimSpace(cfg.CloudName) == "" || strings.TrimSpace(cfg.APIKey) == "" || strings.TrimSpace(cfg.APISecret) == "" {
@@ -355,8 +363,9 @@ func sanitizeContextValue(v string) string {
 func sanitizeCloudinaryFilename(v string) string {
 	base := strings.TrimSpace(v)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
-	base = sanitizeFileName(base)
-	base = strings.TrimSpace(strings.Trim(base, ".-"))
+	base = cloudinaryPublicIDUnsafeRe.ReplaceAllString(base, "")
+	base = cloudinaryPublicIDWhitespaceRe.ReplaceAllString(base, " ")
+	base = strings.Trim(base, " -_")
 	if base == "" {
 		base = fmt.Sprintf("upload-%d", time.Now().UnixNano())
 	}
@@ -501,6 +510,79 @@ func uploadToCloudinary(filePath, caption string, tags string) (string, string, 
 	return url, uploadResult.PublicID, nil
 }
 
+func uploadJobResources(ctx context.Context, job *DownloadJob, upload cloudinaryUploadFunc) error {
+	output := strings.TrimSpace(job.Output)
+	if output == "" {
+		output = strings.TrimSpace(job.OutputPath)
+	}
+	if output == "" {
+		return fmt.Errorf("saved audio resource is missing")
+	}
+	if _, err := os.Stat(output); err != nil {
+		return fmt.Errorf("saved audio resource missing: %w", err)
+	}
+
+	if strings.TrimSpace(job.AudioCloudinaryURL) == "" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		audioCaption := filepath.Base(output)
+		job.log("Cloudinary 음원 업로드 시작 (tags=EDM, caption=%s)", audioCaption)
+		audioURL, audioPublicID, uploadErr := upload(output, audioCaption, "EDM")
+		if uploadErr != nil {
+			return fmt.Errorf("cloudinary audio upload failed: %w", uploadErr)
+		}
+		job.setAudioCloudinary(audioURL, audioPublicID)
+		job.log("Cloudinary 음원 업로드 완료: %s (%s)", audioURL, audioPublicID)
+	} else {
+		job.log("Cloudinary 음원 업로드 건너뜀: 이미 URL이 있습니다")
+	}
+
+	imagePath := strings.TrimSpace(job.ImagePath)
+	if imagePath == "" || strings.TrimSpace(job.ThumbnailCloudinaryURL) != "" {
+		return nil
+	}
+	if _, err := os.Stat(imagePath); err != nil {
+		job.log("cloudinary thumbnail upload skipped: local thumbnail missing: %v", err)
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	thumbCaption := filepath.Base(imagePath)
+	job.log("Cloudinary 썸네일 업로드 시작 (tags=EDM Cover, caption=%s)", thumbCaption)
+	thumbURL, thumbPublicID, thumbErr := upload(imagePath, thumbCaption, "EDM Cover")
+	if thumbErr != nil {
+		job.log("cloudinary thumbnail upload failed: %v", thumbErr)
+		return nil
+	}
+	job.setThumbnailCloudinary(thumbURL, thumbPublicID)
+	job.log("Cloudinary 썸네일 업로드 완료: %s (%s)", thumbURL, thumbPublicID)
+	return nil
+}
+
+func useExistingOutputResource(job *DownloadJob, output string, overwrite bool) (bool, error) {
+	output = strings.TrimSpace(output)
+	if output == "" || overwrite {
+		return false, nil
+	}
+
+	info, err := os.Stat(output)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("output file check failed: %w", err)
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("output path is a directory: %s", output)
+	}
+
+	job.setOutputPath(output)
+	job.log("출력 파일이 이미 존재해서 기존 리소스로 사용합니다: %s", output)
+	return true, nil
+}
+
 func runCLI(url, formatArg, outputArg string, timeoutMin int, overwrite bool) error {
 	format := strings.ToLower(strings.TrimSpace(formatArg))
 	if err := validateFormat(format); err != nil {
@@ -572,52 +654,37 @@ func runCLI(url, formatArg, outputArg string, timeoutMin int, overwrite bool) er
 			return fmt.Errorf("異쒕젰 ?붾젆?곕━ ?앹꽦 ?ㅽ뙣: %w", err)
 		}
 	}
-	if !overwrite {
-		if _, err := os.Stat(output); err == nil {
-			job.Error = fmt.Sprintf("異쒕젰 ?뚯씪???대? 議댁옱?⑸땲?? --overwrite ?ъ슜 ?먮뒗 ?ㅻⅨ 寃쎈줈 吏?? %s", output)
-			return errors.New(job.Error)
-		}
-	}
-
-	err := downloadWithLogs(ctx, job, url, output, format)
-	job.setStatus(func() JobStatus {
-		if err == nil {
-			return statusDone
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return statusTimeout
-		}
-		return statusFailed
-	}())
+	reusedExisting, err := useExistingOutputResource(job, output, overwrite)
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			job.Error = "?묒뾽???쒗븳 ?쒓컙??珥덇낵?덉뒿?덈떎."
-			return errors.New(job.Error)
-		}
 		job.Error = err.Error()
 		return err
 	}
-
-	audioCaption := filepath.Base(output)
-	job.log("Cloudinary 음원 업로드 시작 (tags=EDM, caption=%s)", audioCaption)
-	audioURL, audioPublicID, uploadErr := uploadToCloudinary(output, audioCaption, "EDM")
-	if uploadErr != nil {
-		job.Error = fmt.Sprintf("cloudinary audio upload failed: %v", uploadErr)
-		return errors.New(job.Error)
-	}
-	job.setAudioCloudinary(audioURL, audioPublicID)
-	job.log("Cloudinary 음원 업로드 완료: %s (%s)", audioURL, audioPublicID)
-
-	if strings.TrimSpace(job.ImagePath) != "" {
-		thumbCaption := filepath.Base(job.ImagePath)
-		job.log("Cloudinary 썸네일 업로드 시작 (tags=EDM Cover, caption=%s)", thumbCaption)
-		thumbURL, thumbPublicID, thumbErr := uploadToCloudinary(job.ImagePath, thumbCaption, "EDM Cover")
-		if thumbErr != nil {
-			job.log("cloudinary thumbnail upload failed: %v", thumbErr)
-		} else {
-			job.setThumbnailCloudinary(thumbURL, thumbPublicID)
-			job.log("Cloudinary 썸네일 업로드 완료: %s (%s)", thumbURL, thumbPublicID)
+	if !reusedExisting {
+		downloadErr := downloadWithLogs(ctx, job, url, output, format)
+		job.setStatus(func() JobStatus {
+			if downloadErr == nil {
+				return statusDone
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return statusTimeout
+			}
+			return statusFailed
+		}())
+		if downloadErr != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				job.Error = "?묒뾽???쒗븳 ?쒓컙??珥덇낵?덉뒿?덈떎."
+				return errors.New(job.Error)
+			}
+			job.Error = downloadErr.Error()
+			return downloadErr
 		}
+	} else {
+		job.setStatus(statusDone)
+	}
+
+	if err := uploadJobResources(ctx, job, uploadToCloudinary); err != nil {
+		job.Error = err.Error()
+		return err
 	}
 
 	now := time.Now()
@@ -643,6 +710,10 @@ func runWeb(port int) {
 		handleCreateJob(store, w, r)
 	})
 	mux.HandleFunc("/api/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/upload") {
+			handleRetryUpload(store, w, r)
+			return
+		}
 		handleJobStatus(store, w, r)
 	})
 	mux.HandleFunc("/api/files/", func(w http.ResponseWriter, r *http.Request) {
@@ -680,7 +751,7 @@ func handleCreateJob(store *JobStore, w http.ResponseWriter, r *http.Request) {
 
 	format := strings.ToLower(strings.TrimSpace(req.Format))
 	if format == "" {
-		format = "mp3"
+		format = defaultFormat
 	}
 	if err := validateFormat(format); err != nil {
 		writeJSONError(w, err.Error(), http.StatusBadRequest)
@@ -788,26 +859,42 @@ func runDownloadJob(job *DownloadJob) {
 		job.done = true
 		return
 	}
-	if !job.Overwrite {
-		if _, err := os.Stat(job.Output); err == nil {
-			job.Error = fmt.Sprintf("출력 파일이 이미 존재합니다: %s", job.Output)
-			job.log("에러: %s", job.Error)
-			job.setStatus(statusFailed)
+	reusedExisting, err := useExistingOutputResource(job, job.Output, job.Overwrite)
+	if err != nil {
+		job.Error = err.Error()
+		job.log("에러: %s", job.Error)
+		job.setStatus(statusFailed)
+		job.done = true
+		now := time.Now()
+		job.FinishedAt = &now
+		return
+	}
+	if !reusedExisting {
+		downloadErr := downloadWithLogs(ctx, job, job.URL, job.Output, job.Format)
+		if downloadErr != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				job.setStatus(statusTimeout)
+				job.Error = "작업시간 초과"
+			} else {
+				job.setStatus(statusFailed)
+				job.Error = downloadErr.Error()
+			}
+			job.log("다운로드 실패: %s", job.Error)
+			job.ExitCode = 1
 			job.done = true
+			now := time.Now()
+			job.FinishedAt = &now
 			return
 		}
+	} else {
+		job.log("다운로드 건너뜀: 기존 출력 파일 사용")
 	}
 
-	err := downloadWithLogs(ctx, job, job.URL, job.Output, job.Format)
-	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			job.setStatus(statusTimeout)
-			job.Error = "작업시간 초과"
-		} else {
-			job.setStatus(statusFailed)
-			job.Error = err.Error()
-		}
-		job.log("다운로드 실패: %s", job.Error)
+	job.OutputPath = job.Output
+	if err := uploadJobResources(ctx, job, uploadToCloudinary); err != nil {
+		job.Error = err.Error()
+		job.setStatus(statusFailed)
+		job.log("%s", job.Error)
 		job.ExitCode = 1
 		job.done = true
 		now := time.Now()
@@ -815,37 +902,10 @@ func runDownloadJob(job *DownloadJob) {
 		return
 	}
 
+	job.setStatus(statusDone)
+	job.done = true
 	now := time.Now()
 	job.FinishedAt = &now
-	job.OutputPath = job.Output
-	job.setStatus(statusDone)
-	audioCaption := filepath.Base(job.Output)
-	job.log("Cloudinary 음원 업로드 시작 (tags=EDM, caption=%s)", audioCaption)
-	audioURL, audioPublicID, uploadErr := uploadToCloudinary(job.Output, audioCaption, "EDM")
-	if uploadErr != nil {
-		job.Error = fmt.Sprintf("cloudinary audio upload failed: %v", uploadErr)
-		job.setStatus(statusFailed)
-		job.log("cloudinary audio upload failed: %v", uploadErr)
-		job.ExitCode = 1
-		job.done = true
-		return
-	}
-	job.setAudioCloudinary(audioURL, audioPublicID)
-	job.log("Cloudinary 음원 업로드 완료: %s (%s)", audioURL, audioPublicID)
-
-	if strings.TrimSpace(job.ImagePath) != "" {
-		thumbCaption := filepath.Base(job.ImagePath)
-		job.log("Cloudinary 썸네일 업로드 시작 (tags=EDM Cover, caption=%s)", thumbCaption)
-		thumbURL, thumbPublicID, thumbErr := uploadToCloudinary(job.ImagePath, thumbCaption, "EDM Cover")
-		if thumbErr != nil {
-			job.log("cloudinary thumbnail upload failed: %v", thumbErr)
-		} else {
-			job.setThumbnailCloudinary(thumbURL, thumbPublicID)
-			job.log("Cloudinary 썸네일 업로드 완료: %s (%s)", thumbURL, thumbPublicID)
-		}
-	}
-
-	job.done = true
 	job.log("다운로드 완료: %s", job.Output)
 }
 
@@ -911,13 +971,170 @@ func downloadThumbnail(ctx context.Context, rawURL, fileBase string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("thumbnail file create failed: %w", err)
 	}
-	defer f.Close()
 
 	if _, err := io.Copy(f, res.Body); err != nil {
+		_ = f.Close()
 		return "", fmt.Errorf("thumbnail write failed: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("thumbnail file close failed: %w", err)
+	}
+
+	// Cloudinary assets must stay 1:1 without stretching the source image.
+	if _, err := cropImageToSquareWithContext(ctx, imagePath); err != nil {
+		return "", fmt.Errorf("thumbnail square crop failed: %w", err)
 	}
 
 	return imagePath, nil
+}
+
+func cropImageToSquare(path string) (bool, error) {
+	return cropImageToSquareWithContext(context.Background(), path)
+}
+
+func cropImageToSquareWithContext(ctx context.Context, path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open thumbnail: %w", err)
+	}
+
+	config, format, err := image.DecodeConfig(f)
+	if err != nil {
+		_ = f.Close()
+		return cropImageToSquareWithFFmpeg(ctx, path)
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		_ = f.Close()
+		return false, fmt.Errorf("invalid thumbnail dimensions: %dx%d", config.Width, config.Height)
+	}
+	if config.Width == config.Height {
+		if err := f.Close(); err != nil {
+			return false, fmt.Errorf("close thumbnail: %w", err)
+		}
+		return false, nil
+	}
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return false, fmt.Errorf("seek thumbnail: %w", err)
+	}
+	img, _, err := image.Decode(f)
+	if closeErr := f.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return cropImageToSquareWithFFmpeg(ctx, path)
+	}
+
+	if err := writeCenterCroppedImage(path, img, format); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func writeCenterCroppedImage(path string, img image.Image, format string) error {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("invalid thumbnail bounds: %dx%d", width, height)
+	}
+
+	side := width
+	if height < side {
+		side = height
+	}
+	srcPoint := image.Point{
+		X: bounds.Min.X + (width-side)/2,
+		Y: bounds.Min.Y + (height-side)/2,
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, side, side))
+	draw.Draw(dst, dst.Bounds(), img, srcPoint, draw.Src)
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "square-*"+filepath.Ext(path))
+	if err != nil {
+		return fmt.Errorf("create square thumbnail temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	encodeErr := encodeCroppedImage(tmp, dst, format)
+	closeErr := tmp.Close()
+	if encodeErr != nil {
+		_ = os.Remove(tmpPath)
+		return encodeErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close square thumbnail temp file: %w", closeErr)
+	}
+
+	if err := replaceFileWithTemp(path, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func encodeCroppedImage(w io.Writer, img image.Image, format string) error {
+	switch strings.ToLower(format) {
+	case "jpeg", "jpg":
+		return jpeg.Encode(w, img, &jpeg.Options{Quality: 92})
+	case "png":
+		return png.Encode(w, img)
+	case "gif":
+		return gif.Encode(w, img, nil)
+	default:
+		return fmt.Errorf("unsupported thumbnail image format: %s", format)
+	}
+}
+
+func cropImageToSquareWithFFmpeg(ctx context.Context, path string) (bool, error) {
+	tmpPath := squareCropTempPath(path)
+	filter := "crop=min(iw\\,ih):min(iw\\,ih):(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2"
+	cmd := exec.CommandContext(
+		ctx,
+		"ffmpeg",
+		"-y",
+		"-hide_banner",
+		"-loglevel", "error",
+		"-i", path,
+		"-vf", filter,
+		tmpPath,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return false, fmt.Errorf("ffmpeg square crop failed: %w", err)
+		}
+		return false, fmt.Errorf("ffmpeg square crop failed: %w: %s", err, msg)
+	}
+	if err := replaceFileWithTemp(path, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, err
+	}
+	return true, nil
+}
+
+func squareCropTempPath(path string) string {
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), ext)
+	return filepath.Join(filepath.Dir(path), fmt.Sprintf("%s.square-%s%s", base, randomID(), ext))
+}
+
+func replaceFileWithTemp(path, tempPath string) error {
+	backupPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.backup-%s", filepath.Base(path), randomID()))
+	if err := os.Rename(path, backupPath); err != nil {
+		return fmt.Errorf("backup original thumbnail: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		_ = os.Rename(backupPath, path)
+		return fmt.Errorf("replace square thumbnail: %w", err)
+	}
+	if err := os.Remove(backupPath); err != nil {
+		return fmt.Errorf("remove original thumbnail backup: %w", err)
+	}
+	return nil
 }
 
 func handleJobStatus(store *JobStore, w http.ResponseWriter, r *http.Request) {
@@ -939,6 +1156,117 @@ func handleJobStatus(store *JobStore, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job.snapshot())
+}
+
+func handleRetryUpload(store *JobStore, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id, ok := retryUploadJobID(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	job := store.get(id)
+	if job == nil {
+		writeJSONError(w, "job not found", http.StatusNotFound)
+		return
+	}
+
+	job.mu.Lock()
+	if !job.done {
+		job.mu.Unlock()
+		writeJSONError(w, "job is not finished", http.StatusConflict)
+		return
+	}
+	output := strings.TrimSpace(job.Output)
+	if output == "" {
+		output = strings.TrimSpace(job.OutputPath)
+	}
+	needsAudio := strings.TrimSpace(job.AudioCloudinaryURL) == ""
+	needsThumbnail := strings.TrimSpace(job.ImagePath) != "" && strings.TrimSpace(job.ThumbnailCloudinaryURL) == ""
+	if output != "" && job.Output == "" {
+		job.Output = output
+	}
+	job.mu.Unlock()
+
+	if output == "" {
+		writeJSONError(w, "saved audio resource is missing", http.StatusConflict)
+		return
+	}
+	if _, err := os.Stat(output); err != nil {
+		writeJSONError(w, fmt.Sprintf("saved audio resource missing: %v", err), http.StatusConflict)
+		return
+	}
+	if !needsAudio && !needsThumbnail {
+		writeJSON(w, http.StatusOK, job.snapshot())
+		return
+	}
+
+	job.mu.Lock()
+	job.Status = statusRunning
+	job.Error = ""
+	job.ExitCode = 0
+	job.done = false
+	job.FinishedAt = nil
+	job.UpdatedAt = time.Now()
+	job.mu.Unlock()
+
+	job.log("Cloudinary 리소스 업로드 재시도 등록")
+	go runRetryUploadJob(job)
+
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"id": job.ID,
+	})
+}
+
+func retryUploadJobID(path string) (string, bool) {
+	rest := strings.TrimPrefix(path, "/api/jobs/")
+	if rest == path {
+		return "", false
+	}
+	id, action, ok := strings.Cut(rest, "/")
+	if !ok || strings.TrimSpace(id) == "" || action != "upload" {
+		return "", false
+	}
+	return strings.TrimSpace(id), true
+}
+
+func runRetryUploadJob(job *DownloadJob) {
+	timeout := job.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Minute)
+	defer cancel()
+
+	job.log("Cloudinary 리소스 업로드 재시도 시작")
+	err := uploadJobResources(ctx, job, uploadToCloudinary)
+
+	now := time.Now()
+	job.mu.Lock()
+	job.FinishedAt = &now
+	job.UpdatedAt = now
+	job.done = true
+	if err != nil {
+		job.Status = statusFailed
+		job.Error = err.Error()
+		job.ExitCode = 1
+	} else {
+		job.Status = statusDone
+		job.Error = ""
+		job.ExitCode = 0
+	}
+	job.mu.Unlock()
+
+	if err != nil {
+		job.log("Cloudinary 리소스 업로드 재시도 실패: %v", err)
+		return
+	}
+	job.log("Cloudinary 리소스 업로드 재시도 완료")
 }
 
 func handleDownloadFile(store *JobStore, w http.ResponseWriter, r *http.Request) {
@@ -1016,16 +1344,6 @@ func handleDownloadThumbnail(store *JobStore, w http.ResponseWriter, r *http.Req
 
 func downloadWithLogs(ctx context.Context, job *DownloadJob, videoURL, outPath, format string) error {
 	switch format {
-	case "mp3":
-		args := []string{
-			"-x",
-			"--audio-format", "mp3",
-			"--audio-quality", "0",
-			"--no-playlist",
-			"-o", outPath,
-			videoURL,
-		}
-		return runCommandWithLog(ctx, job, args)
 	case "mp4":
 		tempOut := strings.TrimSuffix(outPath, filepath.Ext(outPath)) + ".m4a"
 		args := []string{
@@ -1048,7 +1366,7 @@ func downloadWithLogs(ctx context.Context, job *DownloadJob, videoURL, outPath, 
 		job.OutputPath = outPath
 		return nil
 	default:
-		return fmt.Errorf("吏?먮릺吏 ?딅뒗 ?щ㎎: %s", format)
+		return fmt.Errorf("unsupported format: %s", format)
 	}
 }
 
@@ -1100,8 +1418,8 @@ func runCommandWithLog(ctx context.Context, job *DownloadJob, args []string) err
 
 func validateFormat(format string) error {
 	format = strings.ToLower(strings.TrimSpace(format))
-	if format != "mp3" && format != "mp4" {
-		return fmt.Errorf("format must be mp3 or mp4")
+	if format != defaultFormat {
+		return fmt.Errorf("format must be mp4")
 	}
 	return nil
 }
@@ -1110,9 +1428,9 @@ func checkDeps(format string) error {
 	if _, err := exec.LookPath("yt-dlp"); err != nil {
 		return errors.New("yt-dlp媛 ?꾩슂?⑸땲?? ?ㅼ튂 ??PATH??異붽??섏꽭??")
 	}
-	if format == "mp3" || format == "mp4" {
+	if format == defaultFormat {
 		if _, err := exec.LookPath("ffmpeg"); err != nil {
-			return errors.New("mp4/mp3 異붿텧?먮뒗 ffmpeg媛 ?꾩슂?⑸땲?? ?ㅼ튂 ??PATH??異붽??섏꽭??")
+			return errors.New("mp4 extraction requires ffmpeg. Install it and add it to PATH")
 		}
 	}
 	return nil
@@ -1124,8 +1442,11 @@ func normalizeOutputPath(output, format string) string {
 		return ""
 	}
 	ext := strings.ToLower(filepath.Ext(clean))
-	if ext == ".mp3" || ext == ".mp4" {
+	if ext == ".mp4" {
 		return clean
+	}
+	if ext == ".mp3" {
+		return strings.TrimSuffix(clean, filepath.Ext(clean)) + "." + strings.ToLower(format)
 	}
 	return clean + "." + strings.ToLower(format)
 }
@@ -1135,6 +1456,8 @@ func randomID() string {
 }
 
 var sanitizeRe = regexp.MustCompile(`[\\/:*?"<>|]+`)
+var cloudinaryPublicIDUnsafeRe = regexp.MustCompile(`[^A-Za-z0-9 _-]+`)
+var cloudinaryPublicIDWhitespaceRe = regexp.MustCompile(`\s+`)
 
 func sanitizeFileName(name string) string {
 	clean := strings.TrimSpace(name)
@@ -1232,7 +1555,7 @@ const indexTemplate = `
       font-size: 12px;
       line-height: 1.4;
     }
-    .actions a {
+    .actions a, .actions button {
       display: inline-block;
       margin-top: 10px;
       text-decoration: none;
@@ -1244,6 +1567,12 @@ const indexTemplate = `
       margin-right: 8px;
       font-size: 13px;
       font-weight: 700;
+      cursor: pointer;
+      width: auto;
+    }
+    .actions button:disabled {
+      cursor: wait;
+      opacity: 0.65;
     }
     .thumb {
       margin-top: 12px;
@@ -1270,7 +1599,12 @@ const indexTemplate = `
   <div class="wrap">
     <div class="card">
       <h1>YouTube 다운로드</h1>
-      <p class="muted">유튜브 링크를 넣으면 mp3 또는 mp4로 저장하고, 제목을 기반으로 파일/썸네일 이름이 생성됩니다.</p>
+      <p class="muted">유튜브 링크를 넣으면 mp4로 저장하고, 제목을 기반으로 파일/썸네일 이름이 생성됩니다.</p>
+
+      <div class="log-wrap">
+        <div id="logbox" class="logbox"></div>
+      </div>
+
       <form id="download-form">
         <div>
           <label for="url">YouTube URL</label>
@@ -1280,13 +1614,12 @@ const indexTemplate = `
           <div>
             <label for="format">포맷</label>
             <select id="format" name="format">
-              <option value="mp3">mp3</option>
               <option value="mp4">mp4 (m4a audio extract)</option>
             </select>
           </div>
           <div>
             <label for="timeout">타임아웃(분)</label>
-            <input id="timeout" name="timeout" type="number" value="30" min="1" />
+            <input id="timeout" name="timeout" type="number" value="1" min="1" />
           </div>
         </div>
         <div>
@@ -1319,14 +1652,11 @@ const indexTemplate = `
       <div class="actions" id="actions-box">
         <a id="download-link" href="#" style="display:none;">완료 파일 다운로드</a>
         <a id="thumbnail-link" href="#" style="display:none;">썸네일 다운로드</a>
+        <button id="retry-upload-button" type="button" style="display:none;">Cloudinary 업로드 재시도</button>
       </div>
 
       <div class="thumb" id="thumbnail-box">
         <img id="thumbnail-preview" src="#" alt="썸네일" />
-      </div>
-
-      <div class="log-wrap">
-        <div id="logbox" class="logbox"></div>
       </div>
     </div>
   </div>
@@ -1338,6 +1668,7 @@ const indexTemplate = `
     const logbox = document.getElementById('logbox');
     const downloadLink = document.getElementById('download-link');
     const thumbLink = document.getElementById('thumbnail-link');
+    const retryUploadButton = document.getElementById('retry-upload-button');
     const metaBox = document.getElementById('meta-box');
     const outNameEl = document.getElementById('out-name');
     const thumbNameEl = document.getElementById('thumb-name');
@@ -1357,11 +1688,46 @@ const indexTemplate = `
 
     let timer = null;
 
+    retryUploadButton.addEventListener('click', async () => {
+      const jobId = retryUploadButton.dataset.jobId;
+      if (!jobId) return;
+
+      retryUploadButton.disabled = true;
+      statusEl.textContent = 'Cloudinary 업로드 재시도 중...';
+      messageEl.style.color = '#52607a';
+      messageEl.textContent = '';
+
+      try {
+        const res = await fetch('/api/jobs/' + jobId + '/upload', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) {
+          statusEl.textContent = 'Cloudinary 업로드 재시도 실패';
+          messageEl.style.color = '#b61f2a';
+          messageEl.textContent = data.error || '업로드 재시도 요청 실패';
+          retryUploadButton.disabled = false;
+          return;
+        }
+
+        retryUploadButton.style.display = 'none';
+        if (timer) clearInterval(timer);
+        pollStatus(jobId);
+        timer = setInterval(() => pollStatus(jobId), 1000);
+      } catch (err) {
+        statusEl.textContent = '오류';
+        messageEl.style.color = '#b61f2a';
+        messageEl.textContent = err.message || String(err);
+        retryUploadButton.disabled = false;
+      }
+    });
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       if (timer) clearInterval(timer);
       downloadLink.style.display = 'none';
       thumbLink.style.display = 'none';
+      retryUploadButton.style.display = 'none';
+      retryUploadButton.disabled = false;
+      retryUploadButton.dataset.jobId = '';
       thumbWrap.style.display = 'none';
       metaBox.style.display = 'none';
       logbox.textContent = '';
@@ -1425,6 +1791,15 @@ const indexTemplate = `
         cloudAudioEl.textContent = data.audioCloudinaryUrl || '-';
         cloudThumbEl.textContent = data.thumbnailCloudinaryUrl || '-';
 
+        const retryAvailable = Boolean(
+          data.done &&
+          data.outputPath &&
+          (!data.audioCloudinaryUrl || (data.imagePath && !data.thumbnailCloudinaryUrl))
+        );
+        retryUploadButton.style.display = retryAvailable ? 'inline-block' : 'none';
+        retryUploadButton.disabled = false;
+        retryUploadButton.dataset.jobId = retryAvailable ? jobId : '';
+
         if (data.imagePath) {
           thumbWrap.style.display = 'block';
           thumbImage.src = '/api/thumbnail/' + jobId + '?v=' + Date.now();
@@ -1466,6 +1841,3 @@ func renderIndex(w http.ResponseWriter, r *http.Request) {
 		log.Printf("index render write error: %v", err)
 	}
 }
-
-
-
