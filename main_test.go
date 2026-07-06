@@ -41,13 +41,15 @@ func TestUploadJobResourcesUploadsSavedAudioAndThumbnail(t *testing.T) {
 		path    string
 		caption string
 		tags    string
+		genre   string
 	}
-	upload := func(filePath, caption, tags string) (string, string, error) {
+	upload := func(filePath, caption, tags, genre string) (string, string, error) {
 		calls = append(calls, struct {
 			path    string
 			caption string
 			tags    string
-		}{path: filePath, caption: caption, tags: tags})
+			genre   string
+		}{path: filePath, caption: caption, tags: tags, genre: genre})
 		return "https://cloud.example/" + filepath.Base(filePath), "public-" + caption, nil
 	}
 
@@ -72,6 +74,45 @@ func TestUploadJobResourcesUploadsSavedAudioAndThumbnail(t *testing.T) {
 	}
 }
 
+func TestUploadJobResourcesUsesGenreForTagsAndFolder(t *testing.T) {
+	dir := t.TempDir()
+	audioPath := filepath.Join(dir, "song.mp4")
+	thumbPath := filepath.Join(dir, "thumb.png")
+	if err := os.WriteFile(audioPath, []byte("audio"), 0o644); err != nil {
+		t.Fatalf("write audio: %v", err)
+	}
+	if err := os.WriteFile(thumbPath, []byte("thumb"), 0o644); err != nil {
+		t.Fatalf("write thumbnail: %v", err)
+	}
+
+	job := &DownloadJob{Output: audioPath, ImagePath: thumbPath, Genre: "pop"}
+	var calls []struct {
+		tags  string
+		genre string
+	}
+	upload := func(filePath, caption, tags, genre string) (string, string, error) {
+		calls = append(calls, struct {
+			tags  string
+			genre string
+		}{tags: tags, genre: genre})
+		return "https://cloud.example/" + filepath.Base(filePath), "public-" + caption, nil
+	}
+
+	if err := uploadJobResources(context.Background(), job, upload); err != nil {
+		t.Fatalf("uploadJobResources returned error: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("upload calls = %d, want 2", len(calls))
+	}
+	if calls[0].tags != "POP" || calls[0].genre != "pop" {
+		t.Fatalf("audio upload call = %+v, want tags=POP genre=pop", calls[0])
+	}
+	if calls[1].tags != "POP Cover" || calls[1].genre != "pop" {
+		t.Fatalf("thumbnail upload call = %+v, want tags=\"POP Cover\" genre=pop", calls[1])
+	}
+}
+
 func TestUploadJobResourcesSkipsAlreadyUploadedResources(t *testing.T) {
 	dir := t.TempDir()
 	audioPath := filepath.Join(dir, "song.mp4")
@@ -90,7 +131,7 @@ func TestUploadJobResourcesSkipsAlreadyUploadedResources(t *testing.T) {
 		AudioCloudinaryPublicID: "existing-song",
 	}
 	var calls []string
-	upload := func(filePath, caption, tags string) (string, string, error) {
+	upload := func(filePath, caption, tags, genre string) (string, string, error) {
 		calls = append(calls, tags)
 		return "https://cloud.example/" + filepath.Base(filePath), "public-" + caption, nil
 	}
@@ -106,7 +147,7 @@ func TestUploadJobResourcesSkipsAlreadyUploadedResources(t *testing.T) {
 
 func TestUploadJobResourcesRequiresSavedAudio(t *testing.T) {
 	job := &DownloadJob{Output: filepath.Join(t.TempDir(), "missing.mp4")}
-	upload := func(filePath, caption, tags string) (string, string, error) {
+	upload := func(filePath, caption, tags, genre string) (string, string, error) {
 		t.Fatalf("upload called for missing resource: %s", filePath)
 		return "", "", nil
 	}
@@ -169,12 +210,75 @@ func TestNormalizeOutputPathRemovesMP3Extension(t *testing.T) {
 	}
 }
 
+func TestNormalizeGenre(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "edm", input: "edm", want: "edm"},
+		{name: "pop", input: "pop", want: "pop"},
+		{name: "uppercase pop", input: "POP", want: "pop"},
+		{name: "padded pop", input: "  pop  ", want: "pop"},
+		{name: "empty defaults to edm", input: "", want: "edm"},
+		{name: "unknown falls back to edm", input: "rock", want: "edm"},
+		{name: "path injection falls back to edm", input: "../secret", want: "edm"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeGenre(tt.input); got != tt.want {
+				t.Fatalf("normalizeGenre(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveCloudinaryFolder(t *testing.T) {
+	tests := []struct {
+		name  string
+		base  string
+		genre string
+		want  string
+	}{
+		{name: "edm appends edm", base: "edmm/media-pipeline", genre: "edm", want: "edmm/media-pipeline/edm"},
+		{name: "pop appends pop", base: "edmm/media-pipeline", genre: "pop", want: "edmm/media-pipeline/pop"},
+		{name: "empty genre defaults to edm", base: "edmm/media-pipeline", genre: "", want: "edmm/media-pipeline/edm"},
+		{name: "unknown genre falls back to edm", base: "edmm/media-pipeline", genre: "rock", want: "edmm/media-pipeline/edm"},
+		{name: "trailing slash on base", base: "edmm/media-pipeline/", genre: "pop", want: "edmm/media-pipeline/pop"},
+		{name: "empty base returns genre only", base: "", genre: "pop", want: "pop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveCloudinaryFolder(tt.base, tt.genre); got != tt.want {
+				t.Fatalf("resolveCloudinaryFolder(%q, %q) = %q, want %q", tt.base, tt.genre, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIndexTemplateOffersOnlyMP4(t *testing.T) {
 	if strings.Contains(indexTemplate, `value="mp3"`) {
 		t.Fatal("index template still offers mp3")
 	}
 	if !strings.Contains(indexTemplate, `value="mp4"`) {
 		t.Fatal("index template does not offer mp4")
+	}
+}
+
+func TestIndexTemplateOffersGenreSelectDefaultingToEDM(t *testing.T) {
+	if !strings.Contains(indexTemplate, `id="genre"`) {
+		t.Fatal("index template does not contain genre select")
+	}
+	if !strings.Contains(indexTemplate, `<option value="edm" selected>`) {
+		t.Fatal("index template does not default genre to edm")
+	}
+	if !strings.Contains(indexTemplate, `<option value="pop">`) {
+		t.Fatal("index template does not offer pop genre")
+	}
+	if !strings.Contains(indexTemplate, `genre: document.getElementById('genre').value`) {
+		t.Fatal("submit body does not include genre value")
 	}
 }
 

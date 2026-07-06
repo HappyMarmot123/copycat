@@ -61,7 +61,7 @@ type CloudinaryUploadResult struct {
 	Error     *CloudinaryError `json:"error"`
 }
 
-type cloudinaryUploadFunc func(filePath, caption string, tags string) (string, string, error)
+type cloudinaryUploadFunc func(filePath, caption, tags, genre string) (string, string, error)
 
 type CloudinaryError struct {
 	Message string `json:"message"`
@@ -85,6 +85,7 @@ type DownloadJob struct {
 	OutputByUser bool
 	Timeout      int
 	Overwrite    bool
+	Genre        string
 
 	Status                      JobStatus
 	Error                       string
@@ -146,6 +147,7 @@ type DownloadRequest struct {
 	Output    string `json:"output"`
 	Timeout   int    `json:"timeout"`
 	Overwrite bool   `json:"overwrite"`
+	Genre     string `json:"genre"`
 }
 
 type JobStore struct {
@@ -346,6 +348,29 @@ func getCloudinaryConfig() (CloudinaryConfig, bool) {
 	return cfg, true
 }
 
+// normalizeGenre maps arbitrary input to a whitelisted genre slug. Only "pop"
+// is recognized; everything else (including empty and unknown values) falls back
+// to "edm". This keeps genre values safe to use as a Cloudinary folder segment.
+func normalizeGenre(genre string) string {
+	switch strings.ToLower(strings.TrimSpace(genre)) {
+	case "pop":
+		return "pop"
+	default:
+		return "edm"
+	}
+}
+
+// resolveCloudinaryFolder appends the normalized genre as a subfolder of the base
+// upload folder, e.g. base "edmm/media-pipeline" + genre "pop" -> "edmm/media-pipeline/pop".
+func resolveCloudinaryFolder(base, genre string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	g := normalizeGenre(genre)
+	if base == "" {
+		return g
+	}
+	return base + "/" + g
+}
+
 func cloudinaryResourceType(filePath string) string {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
@@ -396,11 +421,13 @@ func cloudinarySignature(fields map[string]string, secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func uploadToCloudinary(filePath, caption string, tags string) (string, string, error) {
+func uploadToCloudinary(filePath, caption, tags, genre string) (string, string, error) {
 	cfg, ok := getCloudinaryConfig()
 	if !ok {
 		return "", "", fmt.Errorf("cloudinary env missing")
 	}
+
+	folder := resolveCloudinaryFolder(cfg.UploadFolder, genre)
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -419,7 +446,7 @@ func uploadToCloudinary(filePath, caption string, tags string) (string, string, 
 	contextValue := fmt.Sprintf("caption=%s|title=%s", contextCaption, contextCaption)
 	params := map[string]string{
 		"timestamp": timestamp,
-		"folder":    cfg.UploadFolder,
+		"folder":    folder,
 		"public_id": publicID,
 		"tags":      tags,
 		"context":   contextValue,
@@ -439,8 +466,8 @@ func uploadToCloudinary(filePath, caption string, tags string) (string, string, 
 	if err := writer.WriteField("signature", signature); err != nil {
 		return "", "", fmt.Errorf("cloudinary form build: %w", err)
 	}
-	if strings.TrimSpace(cfg.UploadFolder) != "" {
-		if err := writer.WriteField("folder", cfg.UploadFolder); err != nil {
+	if strings.TrimSpace(folder) != "" {
+		if err := writer.WriteField("folder", folder); err != nil {
 			return "", "", fmt.Errorf("cloudinary form build: %w", err)
 		}
 	}
@@ -522,13 +549,17 @@ func uploadJobResources(ctx context.Context, job *DownloadJob, upload cloudinary
 		return fmt.Errorf("saved audio resource missing: %w", err)
 	}
 
+	genre := normalizeGenre(job.Genre)
+	audioTag := strings.ToUpper(genre) // e.g. EDM, POP
+	thumbTag := audioTag + " Cover"    // e.g. EDM Cover, POP Cover
+
 	if strings.TrimSpace(job.AudioCloudinaryURL) == "" {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		audioCaption := filepath.Base(output)
-		job.log("Cloudinary 음원 업로드 시작 (tags=EDM, caption=%s)", audioCaption)
-		audioURL, audioPublicID, uploadErr := upload(output, audioCaption, "EDM")
+		job.log("Cloudinary 음원 업로드 시작 (tags=%s, caption=%s)", audioTag, audioCaption)
+		audioURL, audioPublicID, uploadErr := upload(output, audioCaption, audioTag, genre)
 		if uploadErr != nil {
 			return fmt.Errorf("cloudinary audio upload failed: %w", uploadErr)
 		}
@@ -550,8 +581,8 @@ func uploadJobResources(ctx context.Context, job *DownloadJob, upload cloudinary
 		return err
 	}
 	thumbCaption := filepath.Base(imagePath)
-	job.log("Cloudinary 썸네일 업로드 시작 (tags=EDM Cover, caption=%s)", thumbCaption)
-	thumbURL, thumbPublicID, thumbErr := upload(imagePath, thumbCaption, "EDM Cover")
+	job.log("Cloudinary 썸네일 업로드 시작 (tags=%s, caption=%s)", thumbTag, thumbCaption)
+	thumbURL, thumbPublicID, thumbErr := upload(imagePath, thumbCaption, thumbTag, genre)
 	if thumbErr != nil {
 		job.log("cloudinary thumbnail upload failed: %v", thumbErr)
 		return nil
@@ -606,6 +637,7 @@ func runCLI(url, formatArg, outputArg string, timeoutMin int, overwrite bool) er
 		OutputByUser: outputProvided,
 		Timeout:      timeoutMin,
 		Overwrite:    overwrite,
+		Genre:        normalizeGenre(""),
 		Status:       statusRunning,
 		Logs:         make([]string, 0, 64),
 	}
@@ -788,6 +820,7 @@ func handleCreateJob(store *JobStore, w http.ResponseWriter, r *http.Request) {
 		OutputByUser: outputByUser,
 		Timeout:      req.Timeout,
 		Overwrite:    req.Overwrite,
+		Genre:        normalizeGenre(req.Genre),
 		Status:       statusQueued,
 		Logs:         make([]string, 0, 64),
 	}
@@ -1618,6 +1651,13 @@ const indexTemplate = `
             </select>
           </div>
           <div>
+            <label for="genre">장르</label>
+            <select id="genre" name="genre">
+              <option value="edm" selected>edm</option>
+              <option value="pop">pop</option>
+            </select>
+          </div>
+          <div>
             <label for="timeout">타임아웃(분)</label>
             <input id="timeout" name="timeout" type="number" value="1" min="1" />
           </div>
@@ -1743,6 +1783,7 @@ const indexTemplate = `
       const body = {
         url: document.getElementById('url').value,
         format: document.getElementById('format').value,
+        genre: document.getElementById('genre').value,
         timeout: Number(document.getElementById('timeout').value || 30),
         output: document.getElementById('output').value,
         overwrite: document.getElementById('overwrite').checked
